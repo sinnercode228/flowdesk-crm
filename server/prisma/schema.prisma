@@ -1,0 +1,123 @@
+// Canonical schema (PostgreSQL). `npm run db:generate:sqlite` derives the SQLite variant used
+// for local development and tests. Enumerations are stored as strings and validated with the
+// shared zod schemas, which keeps the schema portable across both providers.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  name          String
+  passwordHash  String
+  /// "admin" | "manager"
+  role          String         @default("manager")
+  avatarColor   String         @default("#6366f1")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  deals         Deal[]
+  contacts      Contact[]
+  activities    Activity[]
+  refreshTokens RefreshToken[]
+}
+
+/// Opaque rotating refresh tokens. Only a SHA-256 hash is stored; tokens issued from the same
+/// login share a familyId so that reuse of a rotated token revokes the whole family.
+model RefreshToken {
+  id           String    @id @default(cuid())
+  tokenHash    String    @unique
+  familyId     String
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  replacedById String?
+  createdAt    DateTime  @default(now())
+
+  @@index([familyId])
+  @@index([userId])
+}
+
+model Stage {
+  id          String   @id @default(cuid())
+  name        String
+  position    Int
+  probability Int
+  /// "open" | "won" | "lost"
+  kind        String   @default("open")
+  color       String   @default("#6366f1")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deals       Deal[]
+
+  @@index([position])
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String   @unique
+  phone     String?
+  company   String?
+  title     String?
+  /// "lead" | "prospect" | "customer" | "inactive"
+  status    String   @default("lead")
+  ownerId   String?
+  owner     User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deals     Deal[]
+
+  @@index([lastName, firstName])
+  @@index([company])
+  @@index([createdAt])
+}
+
+model Deal {
+  id                String     @id @default(cuid())
+  title             String
+  /// Whole currency units.
+  value             Int
+  currency          String     @default("USD")
+  stageId           String
+  stage             Stage      @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  position          Int        @default(0)
+  /// "low" | "medium" | "high"
+  priority          String     @default("medium")
+  contactId         String?
+  contact           Contact?   @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  ownerId           String
+  owner             User       @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  expectedCloseDate DateTime?
+  closedAt          DateTime?
+  stageChangedAt    DateTime   @default(now())
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  activities        Activity[]
+
+  @@index([stageId, position])
+  @@index([ownerId])
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  dealId    String
+  deal      Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  /// "created" | "stage_changed" | "updated" | "note"
+  type      String
+  message   String
+  /// JSON-encoded ActivityMeta
+  meta      String?
+  createdAt DateTime @default(now())
+
+  @@index([dealId, createdAt])
+}

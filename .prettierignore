@@ -1,0 +1,12 @@
+node_modules
+.next
+out
+dist
+coverage
+package-lock.json
+server/prisma/migrations
+server/prisma/sqlite
+docs/openapi.json
+*.md
+web/next-env.d.ts
+server/.tmp

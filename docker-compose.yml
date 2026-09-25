@@ -1,0 +1,51 @@
+# Full stack: PostgreSQL + Fastify API + static web client (real API mode).
+#   docker compose up --build
+#   web  -> http://localhost:3000   (demo accounts are prefilled on the login page)
+#   api  -> http://localhost:4000/api, Swagger UI -> http://localhost:4000/docs
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: flowdesk
+      POSTGRES_PASSWORD: flowdesk
+      POSTGRES_DB: flowdesk
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U flowdesk']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://flowdesk:flowdesk@db:5432/flowdesk?schema=public
+      # Change for anything beyond local use: openssl rand -base64 48
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-compose-local-secret-change-me-0123456789abcdef}
+      CORS_ORIGIN: http://localhost:3000
+      LOG_LEVEL: info
+    ports:
+      - '4000:4000'
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_MODE: http
+        NEXT_PUBLIC_API_URL: http://localhost:4000/api
+    ports:
+      - '3000:80'
+    depends_on:
+      - api
+
+volumes:
+  db-data:

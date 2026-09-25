@@ -1,0 +1,80 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+}
+
+:root {
+  --bg: #f6f7fb;
+  --surface: #ffffff;
+  --surface-2: #f1f3f9;
+  --line: #e3e6ef;
+  --ink: #111827;
+  --muted: #6b7280;
+  --accent: #4f46e5;
+  --accent-ink: #ffffff;
+  --accent-soft: #eef0ff;
+  --chart-grid: #e5e7eb;
+}
+
+.dark {
+  --bg: #0b0e17;
+  --surface: #131826;
+  --surface-2: #1a2032;
+  --line: #262d42;
+  --ink: #e6e9f2;
+  --muted: #8f98ad;
+  --accent: #818cf8;
+  --accent-ink: #0b0e17;
+  --accent-soft: #1f2440;
+  --chart-grid: #262d42;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+body {
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+.animate-slide-in {
+  animation: slide-in 0.2s ease-out;
+}
+.animate-fade-in {
+  animation: fade-in 0.15s ease-out;
+}

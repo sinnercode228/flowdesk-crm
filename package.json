@@ -1,0 +1,39 @@
+{
+  "name": "flowdesk-crm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FlowDesk: full-stack mini-CRM / sales dashboard. Next.js + Fastify + Prisma + PostgreSQL monorepo.",
+  "license": "MIT",
+  "author": "sinnercode228",
+  "workspaces": [
+    "packages/shared",
+    "server",
+    "web"
+  ],
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "dev": "npm run dev -w web",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build -w server && npm run build -w web",
+    "build:pages": "npm run build:pages -w web",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "ci": "npm run lint && npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^16.5.0",
+    "prettier": "^3.6.2",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.0"
+  },
+  "type": "module"
+}

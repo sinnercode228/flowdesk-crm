@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# python (tooling only)
+.venv/
+__pycache__/
+
+# builds & caches
+dist/
+build/
+out/
+.next/
+.turbo/
+.cache/
+coverage/
+*.tsbuildinfo
+.eslintcache
+.vite/
+.vitest/
+
+# prisma / databases
+*.db
+*.db-journal
+*.sqlite
+server/prisma/sqlite/
+server/.tmp/
+
+# env
+.env
+.env.*
+!.env.example
+
+# misc
+.DS_Store
+*.log
+npm-debug.log*
+.idea/
+.vscode/*
+!.vscode/extensions.json

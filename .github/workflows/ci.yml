@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Format
+        run: npm run format:check
+      - name: Typecheck
+        run: |
+          npm run db:generate:sqlite -w server
+          npm run typecheck
+      - name: Tests (shared, API on SQLite, web)
+        run: npm test
+      - name: Build (API bundle + static web export)
+        run: npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+
+  api-postgres:
+    # Applies the PostgreSQL migration and seeds a real Postgres to catch provider differences.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: flowdesk
+          POSTGRES_PASSWORD: flowdesk
+          POSTGRES_DB: flowdesk
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U flowdesk" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://flowdesk:flowdesk@localhost:5432/flowdesk?schema=public
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate --schema prisma/schema.prisma
+        working-directory: server
+      - run: npx prisma migrate deploy --schema prisma/schema.prisma
+        working-directory: server
+      - run: npm run db:seed -w server
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: docker compose build
