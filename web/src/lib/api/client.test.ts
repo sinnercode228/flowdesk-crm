@@ -15,6 +15,21 @@ function setup() {
   return { client, transport, advance: (ms: number) => (now = new Date(now.getTime() + ms)) };
 }
 
+/** A bare Storage shared by several SessionStore instances, standing in for two tabs. */
+function memoryStorage(): Storage {
+  const data = new Map<string, string>();
+  return {
+    get length() {
+      return data.size;
+    },
+    key: (i) => [...data.keys()][i] ?? null,
+    getItem: (k) => data.get(k) ?? null,
+    setItem: (k, v) => void data.set(k, String(v)),
+    removeItem: (k) => void data.delete(k),
+    clear: () => data.clear(),
+  };
+}
+
 describe('ApiClient', () => {
   it('stores the session on login and sends the bearer token', async () => {
     const { client, transport } = setup();
@@ -44,6 +59,42 @@ describe('ApiClient', () => {
     advance(20 * 60_000);
     await expect(client.deals.list()).rejects.toBeInstanceOf(ApiError);
     expect(client.session.get()).toBeNull();
+  });
+
+  it('picks up a refresh done by another tab instead of reusing the rotated token', async () => {
+    let now = new Date('2026-05-01T10:00:00Z');
+    const server = createDemoServer({ storage: memoryStateStorage(), now: () => now });
+    const transport = vi.fn(server.transport);
+    const shared = memoryStorage();
+    const tabA = new ApiClient(transport, new SessionStore(shared));
+    const tabB = new ApiClient(transport, new SessionStore(shared));
+    await tabA.auth.login(DEMO_ACCOUNTS.admin.email, DEMO_ACCOUNTS.admin.password);
+    expect(tabB.session.get()?.user.role).toBe('admin');
+
+    now = new Date(now.getTime() + 20 * 60_000);
+    await tabA.stages.list();
+    await expect(tabB.stages.list()).resolves.not.toHaveLength(0);
+    expect(transport.mock.calls.filter(([req]) => req.path === '/auth/refresh')).toHaveLength(1);
+    expect(tabB.session.get()?.refreshToken).toBe(tabA.session.get()?.refreshToken);
+
+    now = new Date(now.getTime() + 20 * 60_000);
+    await expect(tabA.users.list()).resolves.not.toHaveLength(0);
+    expect(tabA.session.get()).not.toBeNull();
+  });
+
+  it('drops the cached session when another tab changes it', async () => {
+    const shared = memoryStorage();
+    const store = new SessionStore(shared);
+    const other = new SessionStore(shared);
+    other.set({ accessToken: 'a1', refreshToken: 'r1', user: { id: 'u' } as never });
+    expect(store.get()?.accessToken).toBe('a1');
+    const seen = vi.fn();
+    store.subscribe(seen);
+
+    other.set(null);
+    window.dispatchEvent(new StorageEvent('storage', { key: 'flowdesk.session.v1' }));
+    expect(store.get()).toBeNull();
+    expect(seen).toHaveBeenCalledWith(null);
   });
 
   it('maps error envelopes to ApiError', async () => {

@@ -55,29 +55,40 @@ export class ApiClient {
       });
     };
 
+    const rejected = this.session.get()?.accessToken;
     let res = await send();
-    if (res.status === 401 && !options.anonymous && this.session.get()) {
-      if (await this.refresh()) res = await send();
+    if (res.status === 401 && !options.anonymous && rejected) {
+      if (await this.refresh(rejected)) res = await send();
       else this.session.set(null);
     }
     if (res.status >= 200 && res.status < 300) return res.body as T;
     throw ApiError.fromBody(res.status, res.body);
   }
 
-  private refresh(): Promise<boolean> {
-    this.refreshing ??= (async () => {
-      const refreshToken = this.session.get()?.refreshToken;
-      if (!refreshToken) return false;
+  /**
+   * Rotates the pair unless another tab already did: storage is re-read first, and the
+   * refresh runs under a cross-tab lock where the browser has one, so a rotated refresh
+   * token is never replayed (the server would revoke the whole family).
+   */
+  private refresh(rejected: string): Promise<boolean> {
+    const rotate = async () => {
+      const current = this.session.reload();
+      if (!current) return false;
+      if (current.accessToken !== rejected) return true;
       const res = await this.transport({
         method: 'POST',
         path: '/auth/refresh',
-        body: { refreshToken },
+        body: { refreshToken: current.refreshToken },
         headers: {},
       });
       if (res.status !== 200) return false;
       this.session.set(res.body as AuthSession);
       return true;
-    })().finally(() => {
+    };
+    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+    const run = async () =>
+      locks ? await locks.request('flowdesk.auth.refresh', rotate) : rotate();
+    this.refreshing ??= run().finally(() => {
       this.refreshing = null;
     });
     return this.refreshing;
