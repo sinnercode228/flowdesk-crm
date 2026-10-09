@@ -12,11 +12,31 @@ Demo: https://sinnercode228.github.io/flowdesk-crm/ runs the same REST API insid
 
 ## The refresh-token race
 
+```mermaid
+sequenceDiagram
+    participant A as Tab A
+    participant B as Tab B
+    participant S as localStorage
+    participant API as POST /api/auth/refresh
+    participant X as Replay of R1
+    Note over A,B: access token T1 expired, both tabs get 401
+    A->>API: R1, sent while holding the refresh lock
+    API-->>A: updateMany where revokedAt is null, count 1, new pair T2 and R2
+    Note over API: a duplicate R1 that passed findUnique before this transaction commits gets count 0, 401 TOKEN_REUSED
+    A->>S: session.set with T2 and R2
+    B->>S: gets the lock, reload()
+    S-->>B: T2 differs from T1, retry with T2 without a refresh
+    X->>API: R1 again
+    API-->>X: R1 is revoked, revokeFamily, R2 revoked too, 401 TOKEN_REUSED
+```
+
+Tabs share the session in localStorage and refresh under one `navigator.locks` lock where the browser has one, so the second tab finds the pair the first one got and retries with it instead of replaying R1 ([`client.ts:68-95`](web/src/lib/api/client.ts#L68-L95), [`session-store.ts:26-38`](web/src/lib/api/session-store.ts#L26-L38)). Write-up on how the rotation, the reuse check and the cross-tab lock fit together: [How FlowDesk rotates refresh tokens with a conditional UPDATE and a cross-tab lock](https://github.com/sinnercode228/sinnercode228/blob/main/notes/flowdesk-refresh-rotation.md).
+
 The access token is a 15-minute JWT: HS256 via `jose`, with the algorithm pinned during verification and the issuer and audience checked. The refresh token is not a JWT. It is 32 random bytes in base64url, single-use, and valid for 7 days (`JWT_ACCESS_TTL` and `REFRESH_TOKEN_TTL_DAYS` set both lifetimes). The database stores only its SHA-256 hash ([`server/src/lib/tokens.ts`](server/src/lib/tokens.ts)), so a dump of the `RefreshToken` table gives nobody a working token. A slow hash is not needed for 256 random bits.
 
 `POST /api/auth/refresh` revokes the presented token and issues a new pair with the same `familyId`, which all tokens from one login share; `replacedById` links each row to its successor. If a token that is already revoked comes back, either the client sent it twice or someone copied it. The server can't tell which of them is legitimate, so it revokes the whole family and answers `401 TOKEN_REUSED`, and both have to log in again ([`auth.service.ts:38-41`](server/src/modules/auth/auth.service.ts#L38-L41)). The user's other sessions have their own families and are not affected. The API tests and the demo tests both check the chain "rotate → replay the old token → the new one is rejected too".
 
-That rule turns an ordinary client race into a logout. The dashboard sends four requests at once (`useAnalytics`, [`web/src/hooks/queries.ts:58`](web/src/hooks/queries.ts#L58)). With an expired access token all four get a 401. If each of them refreshed on its own, the first refresh would win, the other three would present a token that had just been revoked, and the server would treat that as theft, revoke the family and send the user to the login page. `ApiClient` closes this with one shared promise: `refresh()` keeps the request in flight in `this.refreshing` via `??=`, and concurrent 401s wait for it and retry with the new access token ([`web/src/lib/api/client.ts:67-84`](web/src/lib/api/client.ts#L67-L84)). In [`client.test.ts:27-38`](web/src/lib/api/client.test.ts#L27-L38), two requests go out with an expired access token, and exactly one call reaches `/auth/refresh`.
+That rule turns an ordinary client race into a logout. The dashboard sends four requests at once (`useAnalytics`, [`web/src/hooks/queries.ts:58`](web/src/hooks/queries.ts#L58)). With an expired access token all four get a 401. If each of them refreshed on its own, the first refresh would win, the other three would present a token that had just been revoked, and the server would treat that as theft, revoke the family and send the user to the login page. `ApiClient` closes this with one shared promise: `refresh()` keeps the request in flight in `this.refreshing` via `??=`, and concurrent 401s wait for it and retry with the new access token ([`web/src/lib/api/client.ts:91-94`](web/src/lib/api/client.ts#L91-L94)). In [`client.test.ts:42-53`](web/src/lib/api/client.test.ts#L42-L53), two requests go out with an expired access token, and exactly one call reaches `/auth/refresh`.
 
 The server doesn't rely on that. Two requests with the same live token both read it with `revokedAt = null`, and without a guard each would issue its own new pair, leaving the family with two working branches. A conditional update inside the transaction prevents that ([`auth.service.ts:44-60`](server/src/modules/auth/auth.service.ts#L44-L60)):
 
@@ -31,7 +51,7 @@ return this.prisma.$transaction(async (tx) => {
     throw unauthorized('Refresh token reuse detected, please log in again', 'TOKEN_REUSED');
 ```
 
-Only one request gets to update the row. The other sees `count === 0` and gets `401 TOKEN_REUSED`, so no second pair is issued. What this does not cover, two tabs of one session and a test with truly parallel refreshes, is listed under [Known limitations](#known-limitations).
+Only one request gets to update the row. The other sees `count === 0` and gets `401 TOKEN_REUSED`, so no second pair is issued. Two tabs of one session are covered on the client, as in the diagram above; what is still open, including a test with truly parallel refreshes, is listed under [Known limitations](#known-limitations).
 
 Refresh and login are rate-limited separately from the other routes. By default the server lets through 30 refresh requests, 10 login requests and 300 requests to everything else per minute from one IP; the limits come from `RATE_LIMIT_LOGIN_MAX` (tripled for refresh) and `RATE_LIMIT_MAX` ([`auth.routes.ts`](server/src/modules/auth/auth.routes.ts)). On login, the password is checked with scrypt at N=16384, r=8, p=1. The parameters are stored in the hash itself, so they can be raised and old passwords will still verify. If the e-mail isn't found, the password is still checked against a dummy hash, so that login doesn't answer noticeably faster for an unknown address, and the error is `INVALID_CREDENTIALS` in both cases ([`password.ts`](server/src/lib/password.ts), [`auth.service.ts:18-24`](server/src/modules/auth/auth.service.ts#L18-L24)).
 
@@ -92,8 +112,8 @@ Stack: an npm workspaces monorepo with `web` (Next.js 16 with static export, Tan
 
 ## Known limitations
 
-1. Two tabs of one session log each other out ([issue #1](https://github.com/sinnercode228/flowdesk-crm/issues/1)). `SessionStore` keeps the token pair in memory and doesn't listen for the `storage` event ([`session-store.ts`](web/src/lib/api/session-store.ts)), and the shared refresh promise only works within one tab. After tab A rotates the token, tab B presents the revoked one on its own refresh, the server revokes the family, and B calls `session.set(null)` ([`client.ts:61`](web/src/lib/api/client.ts#L61)), which also removes A's fresh pair from localStorage. B is logged out right away, A when its access token expires.
-2. Tokens are stored in localStorage ([`session-store.ts:39`](web/src/lib/api/session-store.ts#L39)), where any script on the page can read them. A refresh token in an httpOnly cookie would be the right way to do it; that's the part I'd redo.
+1. Tabs coordinate refreshes only where `navigator.locks` exists, and browsers expose it only on HTTPS or localhost. Without it, two tabs whose 401s arrive at the same moment both send the same refresh token; the loser gets `TOKEN_REUSED` and calls `session.set(null)` ([`client.ts:62`](web/src/lib/api/client.ts#L62)); if that lands after the winner has stored its new pair, the `storage` event logs the winning tab out as well. The uncoordinated version of this bug ([issue #1](https://github.com/sinnercode228/flowdesk-crm/issues/1)) was fixed in [#2](https://github.com/sinnercode228/flowdesk-crm/pull/2). In the GitHub Pages demo every tab runs its own copy of the demo router, which reads its state from localStorage once ([`server.ts:116`](web/src/lib/demo/server.ts#L116)), so a refresh token issued in one tab after another tab has loaded is unknown to that tab's router.
+2. Tokens are stored in localStorage ([`session-store.ts:56`](web/src/lib/api/session-store.ts#L56)), where any script on the page can read them. A refresh token in an httpOnly cookie would be the right way to do it; that's the part I'd redo.
 3. The refresh race has no concurrent test: [`server/test/auth.test.ts:96-121`](server/test/auth.test.ts#L96-L121) replays a token only sequentially. The two reuse branches also differ: losing the conditional update ([`auth.service.ts:50-51`](server/src/modules/auth/auth.service.ts#L50-L51)) leaves the family alive, while finding an already revoked token ([`:38-41`](server/src/modules/auth/auth.service.ts#L38-L41)) revokes it, so which one a late duplicate hits depends on timing. The code has no comment saying whether that difference is intended.
 4. Revoked and expired refresh tokens are never deleted. The only `deleteMany` on `RefreshToken` is in the seed ([`server/src/db/seed.ts:27`](server/src/db/seed.ts#L27)), so the table only grows.
 5. `move` doesn't lock the column's rows, and `(stageId, position)` has a plain index, not a unique constraint ([`schema.prisma:105`](server/prisma/schema.prisma#L105)). Two concurrent moves into the same stage on PostgreSQL can leave deals with the same `position`. The order stays deterministic (`createdAt` is the second sort key), and the next move into that column renumbers it.
@@ -103,19 +123,19 @@ Stack: an npm workspaces monorepo with `web` (Next.js 16 with static export, Tan
 9. `trustProxy: true` is set unconditionally ([`server/src/app.ts:62`](server/src/app.ts#L62)). Without a reverse proxy in front of the API, a client that sends a different `X-Forwarded-For` value with each request is counted as a new IP every time and never reaches the login limit. The limiter keeps its counters in process memory.
 10. The API integration tests only run on SQLite. The `api-postgres` job in [`ci.yml`](.github/workflows/ci.yml) brings up PostgreSQL 17, but it only applies the migration and runs the seed, so the `mode: 'insensitive'` branch in [`db.ts:9`](server/src/lib/db.ts#L9) has no automated test.
 11. Nothing is paginated on the deals side. `GET /api/deals` returns the whole board, and each of the four analytics endpoints reads all deals and stages on every request ([`analytics.routes.ts:23-32`](server/src/modules/analytics/analytics.routes.ts#L23-L32)), while the dashboard calls all four. The deals page also filters on the client ([`deals-view.tsx:28-38`](web/src/components/deals/deals-view.tsx#L28-L38)), although `GET /api/deals` accepts `search` and `ownerId`. With 54 deals this doesn't matter; with thousands, analytics would need SQL aggregates and the board would need pagination.
-12. Stages can only be managed through the API. `POST`, `PATCH` and `DELETE /api/stages` exist ([`stages.routes.ts`](server/src/modules/stages/stages.routes.ts)), but the web client only lists stages ([`client.ts:107`](web/src/lib/api/client.ts#L107)) and the demo server implements only `GET /stages` ([`server.ts:321`](web/src/lib/demo/server.ts#L321)).
+12. Stages can only be managed through the API. `POST`, `PATCH` and `DELETE /api/stages` exist ([`stages.routes.ts`](server/src/modules/stages/stages.routes.ts)), but the web client only lists stages ([`client.ts:118`](web/src/lib/api/client.ts#L118)) and the demo server implements only `GET /stages` ([`server.ts:321`](web/src/lib/demo/server.ts#L321)).
 
 ## Tests and CI
 
 [![CI](https://github.com/sinnercode228/flowdesk-crm/actions/workflows/ci.yml/badge.svg)](https://github.com/sinnercode228/flowdesk-crm/actions/workflows/ci.yml)
 
-97 tests on Vitest:
+99 tests on Vitest:
 
 | Package | Tests | What they cover |
 | --- | ---: | --- |
 | `packages/shared` | 18 | analytics functions, `can()`, zod schemas, determinism and integrity of the demo data |
 | `server` | 48 | HTTP via supertest: login, refresh token rotation and reuse, expired and forged JWTs, moves with renumbering, search, sorting and pagination, 409 on a duplicate, manager permissions for contacts and stages, analytics, rate limit |
-| `web` | 31 | the demo API (contract, permissions, rollback of failed requests, persistence), `ApiClient`, `applyMove`, formatting, components via Testing Library |
+| `web` | 33 | the demo API (contract, permissions, rollback of failed requests, persistence), `ApiClient` including two tabs sharing one session, `applyMove`, formatting, components via Testing Library |
 
 The API tests start a real Fastify instance on a random loopback port and send requests through supertest. [`global-setup.ts`](server/test/global-setup.ts) creates a seeded SQLite template database once, and each test file copies it for itself ([`helpers.ts`](server/test/helpers.ts)), so the files can run in parallel.
 

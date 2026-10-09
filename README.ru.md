@@ -12,11 +12,31 @@ English version: [README.md](README.md)
 
 ## Гонка за refresh-токеном
 
+```mermaid
+sequenceDiagram
+    participant A as Вкладка A
+    participant B as Вкладка B
+    participant S as localStorage
+    participant API as POST /api/auth/refresh
+    participant X as Повтор R1
+    Note over A,B: access-токен T1 истёк, обе вкладки получили 401
+    A->>API: R1, отправлен под блокировкой refresh
+    API-->>A: updateMany where revokedAt is null, count 1, новая пара T2 и R2
+    Note over API: дубликат R1, прошедший findUnique до коммита этой транзакции, получит count 0 и 401 TOKEN_REUSED
+    A->>S: session.set с T2 и R2
+    B->>S: получила блокировку, reload()
+    S-->>B: T2 не равен T1, повтор запроса с T2 без refresh
+    X->>API: снова R1
+    API-->>X: R1 отозван, revokeFamily, R2 тоже отозван, 401 TOKEN_REUSED
+```
+
+Вкладки делят сессию в localStorage и делают refresh под одной блокировкой `navigator.locks`, если браузер её даёт, поэтому вторая вкладка находит пару, которую получила первая, и повторяет запрос с ней, а не отправляет R1 ещё раз ([`client.ts:68-95`](web/src/lib/api/client.ts#L68-L95), [`session-store.ts:26-38`](web/src/lib/api/session-store.ts#L26-L38)). Разбор того, как связаны ротация, проверка повтора и блокировка между вкладками: [Ротация refresh-токенов в FlowDesk через условный UPDATE и блокировку между вкладками](https://github.com/sinnercode228/sinnercode228/blob/main/notes/flowdesk-refresh-rotation.ru.md).
+
 Access-токен — JWT на 15 минут: HS256 через `jose`, при проверке алгоритм зафиксирован, issuer и audience сверяются. Refresh-токен — не JWT, а 32 случайных байта в base64url; он одноразовый и живёт 7 дней (сроки задаются `JWT_ACCESS_TTL` и `REFRESH_TOKEN_TTL_DAYS`). В базе лежит только его SHA-256 ([`server/src/lib/tokens.ts`](server/src/lib/tokens.ts)), так что дамп таблицы `RefreshToken` готовых токенов не даёт. Медленный хэш для 256 случайных бит не нужен.
 
 `POST /api/auth/refresh` отзывает предъявленный токен и выдаёт новую пару с тем же `familyId`, общим для всех токенов одного логина; `replacedById` связывает каждую строку с её преемником. Если на refresh приходит уже отозванный токен, его отправил второй раз либо сам клиент, либо тот, кто его скопировал. Кто из них настоящий, сервер не знает, поэтому отзывает всю семью и отвечает `401 TOKEN_REUSED`, и войти заново придётся обоим ([`auth.service.ts:38-41`](server/src/modules/auth/auth.service.ts#L38-L41)). Другие сессии пользователя это не задевает, у них свои семьи. Цепочку «ротация → повтор старого токена → новый тоже отклонён» проверяют и тесты API, и тесты демо.
 
-Из-за этого правила обычная гонка на клиенте превращается в выход из системы. Дашборд отправляет четыре запроса параллельно (`useAnalytics`, [`web/src/hooks/queries.ts:58`](web/src/hooks/queries.ts#L58)). Если access истёк, все четыре получают 401. Пойди каждый из них за новой парой сам, первый refresh прошёл бы, остальные три принесли бы только что отозванный токен, сервер счёл бы это кражей, отозвал семью, и пользователь оказался бы на странице входа. В `ApiClient` это закрыто одним общим промисом: `refresh()` кладёт запрос в `this.refreshing` через `??=`, параллельные 401 ждут его и повторяют себя с новым access-токеном ([`web/src/lib/api/client.ts:67-84`](web/src/lib/api/client.ts#L67-L84)). В [`client.test.ts:27-38`](web/src/lib/api/client.test.ts#L27-L38) два запроса уходят с истёкшим access-токеном, и до `/auth/refresh` доходит ровно один вызов.
+Из-за этого правила обычная гонка на клиенте превращается в выход из системы. Дашборд отправляет четыре запроса параллельно (`useAnalytics`, [`web/src/hooks/queries.ts:58`](web/src/hooks/queries.ts#L58)). Если access истёк, все четыре получают 401. Пойди каждый из них за новой парой сам, первый refresh прошёл бы, остальные три принесли бы только что отозванный токен, сервер счёл бы это кражей, отозвал семью, и пользователь оказался бы на странице входа. В `ApiClient` это закрыто одним общим промисом: `refresh()` кладёт запрос в `this.refreshing` через `??=`, параллельные 401 ждут его и повторяют себя с новым access-токеном ([`web/src/lib/api/client.ts:91-94`](web/src/lib/api/client.ts#L91-L94)). В [`client.test.ts:42-53`](web/src/lib/api/client.test.ts#L42-L53) два запроса уходят с истёкшим access-токеном, и до `/auth/refresh` доходит ровно один вызов.
 
 Сервер на это не полагается. Два запроса с одним живым токеном оба прочитают его с `revokedAt = null`, и без защиты каждый выпустил бы по новой паре: у семьи появились бы две рабочие ветки. От этого защищает условное обновление внутри транзакции ([`auth.service.ts:44-60`](server/src/modules/auth/auth.service.ts#L44-L60)):
 
@@ -31,7 +51,7 @@ return this.prisma.$transaction(async (tx) => {
     throw unauthorized('Refresh token reuse detected, please log in again', 'TOKEN_REUSED');
 ```
 
-Строку обновит только один запрос. Второй увидит `count === 0` и получит `401 TOKEN_REUSED`, второй пары не появится. Чего это не закрывает — две вкладки одной сессии и тест с действительно параллельными refresh, — описано в разделе [Известные ограничения](#известные-ограничения).
+Строку обновит только один запрос. Второй увидит `count === 0` и получит `401 TOKEN_REUSED`, второй пары не появится. Две вкладки одной сессии клиент разводит сам, как на схеме выше; что осталось открытым, включая тест с действительно параллельными refresh, описано в разделе [Известные ограничения](#известные-ограничения).
 
 Refresh и логин ограничены отдельно от остальных маршрутов: по умолчанию с одного IP сервер пропускает в минуту 30 запросов на refresh, 10 на логин и 300 на всё остальное; лимиты задаются через `RATE_LIMIT_LOGIN_MAX` (для refresh он утраивается) и `RATE_LIMIT_MAX` ([`auth.routes.ts`](server/src/modules/auth/auth.routes.ts)). Пароль на логине сверяется через scrypt с N=16384, r=8, p=1. Параметры лежат в самом хэше, поэтому их можно поднять, и старые пароли продолжат проверяться. Если e-mail не найден, пароль всё равно сверяется с фиктивным хэшем, чтобы логин не отвечал на такой адрес заметно быстрее; ошибка в обоих случаях `INVALID_CREDENTIALS` ([`password.ts`](server/src/lib/password.ts), [`auth.service.ts:18-24`](server/src/modules/auth/auth.service.ts#L18-L24)).
 
@@ -92,8 +112,8 @@ Refresh и логин ограничены отдельно от остальн�
 
 ## Известные ограничения
 
-1. Две вкладки одной сессии выбивают друг друга ([issue #1](https://github.com/sinnercode228/flowdesk-crm/issues/1)). `SessionStore` держит пару токенов в памяти и не слушает событие `storage` ([`session-store.ts`](web/src/lib/api/session-store.ts)), а общий промис refresh работает только внутри одной вкладки. После того как вкладка A ротировала токен, вкладка B на своём refresh предъявляет отозванный, сервер отзывает семью, B вызывает `session.set(null)` ([`client.ts:61`](web/src/lib/api/client.ts#L61)) и заодно стирает из localStorage свежую пару A. B выходит сразу, A — когда истечёт её access-токен.
-2. Токены лежат в localStorage ([`session-store.ts:39`](web/src/lib/api/session-store.ts#L39)) и доступны любому скрипту на странице. Refresh-токен в httpOnly-cookie был бы правильнее, это место я бы переделал.
+1. Вкладки согласуют refresh только там, где есть `navigator.locks`, а браузеры дают его только на HTTPS или localhost. Без него две вкладки, получившие 401 в один момент, обе отправляют один и тот же refresh-токен; проигравшая получает `TOKEN_REUSED` и вызывает `session.set(null)` ([`client.ts:62`](web/src/lib/api/client.ts#L62)), и если это происходит после того, как победитель сохранил новую пару, событие `storage` выкидывает и победившую вкладку. Вариант этой ошибки без всякой координации ([issue #1](https://github.com/sinnercode228/flowdesk-crm/issues/1)) исправлен в [#2](https://github.com/sinnercode228/flowdesk-crm/pull/2). В демо на GitHub Pages у каждой вкладки своя копия демо-роутера, которая читает состояние из localStorage один раз ([`server.ts:116`](web/src/lib/demo/server.ts#L116)), поэтому refresh-токен, выданный в одной вкладке после загрузки другой, роутеру другой вкладки неизвестен.
+2. Токены лежат в localStorage ([`session-store.ts:56`](web/src/lib/api/session-store.ts#L56)) и доступны любому скрипту на странице. Refresh-токен в httpOnly-cookie был бы правильнее, это место я бы переделал.
 3. У гонки refresh нет конкурентного теста: в [`server/test/auth.test.ts:96-121`](server/test/auth.test.ts#L96-L121) повтор токена проверяется только последовательно. К тому же две ветки повтора ведут себя по-разному: проигравший условное обновление ([`auth.service.ts:50-51`](server/src/modules/auth/auth.service.ts#L50-L51)) семью не трогает, а нашедший уже отозванный токен ([`:38-41`](server/src/modules/auth/auth.service.ts#L38-L41)) отзывает её, так что исход для опоздавшего дубликата зависит от тайминга. Комментария о том, намеренно ли это, в коде нет.
 4. Отозванные и просроченные refresh-токены никто не удаляет. Единственный `deleteMany` по таблице `RefreshToken` — в сиде ([`server/src/db/seed.ts:27`](server/src/db/seed.ts#L27)), так что таблица только растёт.
 5. `move` не блокирует строки колонки, а на `(stageId, position)` стоит обычный индекс, не уникальный ключ ([`schema.prisma:105`](server/prisma/schema.prisma#L105)). Два одновременных перемещения в одну стадию на PostgreSQL могут оставить сделки с одинаковой `position`. Порядок при этом детерминирован (вторым ключом сортировки идёт `createdAt`), а следующее перемещение в колонку перенумерует её заново.
@@ -103,19 +123,19 @@ Refresh и логин ограничены отдельно от остальн�
 9. `trustProxy: true` стоит безусловно ([`server/src/app.ts:62`](server/src/app.ts#L62)). Без обратного прокси перед API клиент, который в каждом запросе шлёт новое значение `X-Forwarded-For`, каждый раз считается новым IP и до лимита на логин не доходит. Счётчики лимитера живут в памяти процесса.
 10. Интеграционные тесты API идут только на SQLite. Job `api-postgres` в [`ci.yml`](.github/workflows/ci.yml) поднимает PostgreSQL 17, но только применяет миграцию и прогоняет сид, так что ветка `mode: 'insensitive'` в [`db.ts:9`](server/src/lib/db.ts#L9) автотестами не покрыта.
 11. Со сделками нет пагинации. `GET /api/deals` отдаёт доску целиком, каждый из четырёх эндпоинтов аналитики на каждый запрос читает все сделки и стадии ([`analytics.routes.ts:23-32`](server/src/modules/analytics/analytics.routes.ts#L23-L32)), а дашборд вызывает все четыре. Страница сделок к тому же фильтрует на клиенте ([`deals-view.tsx:28-38`](web/src/components/deals/deals-view.tsx#L28-L38)), хотя `GET /api/deals` принимает `search` и `ownerId`. На 54 сделках это незаметно; на тысячах аналитику придётся переводить на агрегаты в SQL, а доску — на пагинацию.
-12. Стадиями можно управлять только через API. `POST`, `PATCH` и `DELETE /api/stages` есть ([`stages.routes.ts`](server/src/modules/stages/stages.routes.ts)), но веб-клиент стадии только читает ([`client.ts:107`](web/src/lib/api/client.ts#L107)), а демо-сервер реализует только `GET /stages` ([`server.ts:321`](web/src/lib/demo/server.ts#L321)).
+12. Стадиями можно управлять только через API. `POST`, `PATCH` и `DELETE /api/stages` есть ([`stages.routes.ts`](server/src/modules/stages/stages.routes.ts)), но веб-клиент стадии только читает ([`client.ts:118`](web/src/lib/api/client.ts#L118)), а демо-сервер реализует только `GET /stages` ([`server.ts:321`](web/src/lib/demo/server.ts#L321)).
 
 ## Тесты и CI
 
 [![CI](https://github.com/sinnercode228/flowdesk-crm/actions/workflows/ci.yml/badge.svg)](https://github.com/sinnercode228/flowdesk-crm/actions/workflows/ci.yml)
 
-97 тестов на Vitest:
+99 тестов на Vitest:
 
 | Пакет | Тестов | Что проверяют |
 | --- | ---: | --- |
 | `packages/shared` | 18 | функции аналитики, `can()`, zod-схемы, детерминированность и целостность демо-данных |
 | `server` | 48 | HTTP через supertest: логин, ротация и повтор refresh-токенов, истёкшие и подделанные JWT, перемещение с перенумерацией, поиск, сортировка и пагинация, 409 на дубликат, права менеджера на контакты и стадии, аналитика, rate limit |
-| `web` | 31 | демо-API (контракт, права, откат упавших запросов, сохранение), `ApiClient`, `applyMove`, форматирование, компоненты через Testing Library |
+| `web` | 33 | демо-API (контракт, права, откат упавших запросов, сохранение), `ApiClient`, в том числе две вкладки с одной сессией, `applyMove`, форматирование, компоненты через Testing Library |
 
 Тесты API поднимают настоящий Fastify на случайном порту loopback и ходят в него через supertest. [`global-setup.ts`](server/test/global-setup.ts) один раз создаёт шаблонную SQLite-базу с сидом, а каждый тестовый файл копирует её себе ([`helpers.ts`](server/test/helpers.ts)), поэтому файлы выполняются параллельно.
 
