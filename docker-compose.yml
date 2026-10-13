@@ -1,4 +1,5 @@
 # Full stack: PostgreSQL + Fastify API + static web client (real API mode).
+#   echo "JWT_ACCESS_SECRET=$(openssl rand -base64 48)" > .env   # once; .env is gitignored
 #   docker compose up --build
 #   web  -> http://localhost:3000   (demo accounts are prefilled on the login page)
 #   api  -> http://localhost:4000/api, Swagger UI -> http://localhost:4000/docs
@@ -25,8 +26,11 @@ services:
       NODE_ENV: production
       PORT: 4000
       DATABASE_URL: postgresql://flowdesk:flowdesk@db:5432/flowdesk?schema=public
-      # Change for anything beyond local use: openssl rand -base64 48
-      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-compose-local-secret-change-me-0123456789abcdef}
+      # No fallback: the API runs with NODE_ENV=production and refuses weak or published secrets.
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET, e.g. in .env next to this file (openssl rand -base64 48)}
+      # The browser talks to the API directly on port 4000, with no proxy in front, so
+      # X-Forwarded-For must not be trusted. Set it to the proxy's address if you add one.
+      TRUST_PROXY: 'false'
       CORS_ORIGIN: http://localhost:3000
       LOG_LEVEL: info
     ports:

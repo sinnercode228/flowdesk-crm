@@ -67,4 +67,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build images
-        run: docker compose build
+        # The images do not contain the secret, but compose refuses to read the file without it.
+        run: JWT_ACCESS_SECRET="$(openssl rand -base64 48)" docker compose build

@@ -59,7 +59,9 @@ export function loggerOptions(env: Env): FastifyServerOptions['logger'] {
 export async function buildApp({ env, prisma, logger }: BuildAppOptions) {
   const app = Fastify({
     logger: logger ?? loggerOptions(env),
-    trustProxy: true,
+    // Off by default: with no proxy in front, X-Forwarded-For is whatever the client sends,
+    // and the rate limiter would count each made-up address separately.
+    trustProxy: env.TRUST_PROXY,
     requestIdHeader: 'x-request-id',
     genReqId: () => randomUUID(),
   }).withTypeProvider<ZodTypeProvider>();

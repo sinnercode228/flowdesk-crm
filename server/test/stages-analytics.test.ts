@@ -167,4 +167,32 @@ describe('rate limiting', () => {
       await limited.close();
     }
   });
+
+  /** Four failed logins, each claiming a different client address in X-Forwarded-For. */
+  async function loginStatusesWithRotatingForwardedFor(envOverrides: Record<string, string>) {
+    const limited = await createTestContext({ RATE_LIMIT_LOGIN_MAX: '3', ...envOverrides });
+    try {
+      const statuses = [];
+      for (let i = 1; i <= 4; i++) {
+        const res = await limited.request
+          .post('/api/auth/login')
+          .set('X-Forwarded-For', `203.0.113.${i}`)
+          .send({ email: 'a@b.example', password: 'x' });
+        statuses.push(res.status);
+      }
+      return statuses;
+    } finally {
+      await limited.close();
+    }
+  }
+
+  it('counts logins by the socket address when TRUST_PROXY is off', async () => {
+    expect(await loginStatusesWithRotatingForwardedFor({})).toEqual([401, 401, 401, 429]);
+  });
+
+  it('counts logins by X-Forwarded-For when the request comes from a trusted proxy', async () => {
+    expect(await loginStatusesWithRotatingForwardedFor({ TRUST_PROXY: '127.0.0.1' })).toEqual([
+      401, 401, 401, 401,
+    ]);
+  });
 });
