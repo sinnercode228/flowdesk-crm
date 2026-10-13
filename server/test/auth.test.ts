@@ -1,6 +1,11 @@
+import { randomUUID } from 'node:crypto';
+import { PrismaClient } from '@prisma/client';
 import { SignJWT } from 'jose';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DEMO_ACCOUNTS } from '@flowdesk/shared';
+import { AppError } from '../src/lib/errors';
+import { generateRefreshToken, hashToken } from '../src/lib/tokens';
+import { AuthService } from '../src/modules/auth/auth.service';
 import { createTestContext, TEST_JWT_SECRET, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -148,5 +153,161 @@ describe('refresh token rotation', () => {
       .send({ refreshToken: session.refreshToken });
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('TOKEN_EXPIRED');
+  });
+});
+
+describe('concurrent refreshes with the same token', () => {
+  const familyOf = async (rawToken: string) =>
+    (await ctx.prisma.refreshToken.findUniqueOrThrow({ where: { tokenHash: hashToken(rawToken) } }))
+      .familyId;
+  const liveTokens = (familyId: string) =>
+    ctx.prisma.refreshToken.count({ where: { familyId, revokedAt: null } });
+
+  it('lets one request through and revokes the family, including the pair it got', async () => {
+    const session = await ctx.login('admin');
+    const familyId = await familyOf(session.refreshToken);
+    const send = () =>
+      ctx.request.post('/api/auth/refresh').send({ refreshToken: session.refreshToken });
+    const responses = await Promise.all([send(), send()]);
+
+    expect(responses.map((r) => r.status).sort()).toEqual([200, 401]);
+    const winner = responses.find((r) => r.status === 200)!;
+    const loser = responses.find((r) => r.status === 401)!;
+    expect(loser.body.error.code).toBe('TOKEN_REUSED');
+    expect(await liveTokens(familyId)).toBe(0);
+
+    const next = await ctx.request
+      .post('/api/auth/refresh')
+      .send({ refreshToken: winner.body.refreshToken });
+    expect(next.status).toBe(401);
+    expect(next.body.error.code).toBe('TOKEN_REUSED');
+  });
+
+  it('revokes the family when the duplicate loses the conditional update', async () => {
+    const session = await ctx.login('admin');
+    const familyId = await familyOf(session.refreshToken);
+    // Hold each lookup until both calls have read the token, so both see revokedAt = null
+    // and the second one can only lose at the conditional update inside the transaction.
+    let reads = 0;
+    let bothRead!: () => void;
+    const barrier = new Promise<void>((resolve) => (bothRead = resolve));
+    const racing = ctx.prisma.$extends({
+      query: {
+        refreshToken: {
+          async findUnique({ args, query }) {
+            const row = await query(args);
+            if (++reads === 2) bothRead();
+            await barrier;
+            return row;
+          },
+        },
+      },
+    });
+    const service = new AuthService(racing as unknown as PrismaClient, ctx.env);
+
+    const results = await Promise.allSettled([
+      service.refresh(session.refreshToken),
+      service.refresh(session.refreshToken),
+    ]);
+
+    expect(reads).toBe(2);
+    expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected']);
+    const failure = results.find((r) => r.status === 'rejected')!.reason;
+    expect(failure).toBeInstanceOf(AppError);
+    expect((failure as AppError).code).toBe('TOKEN_REUSED');
+    expect(await liveTokens(familyId)).toBe(0);
+  });
+});
+
+describe('refresh token cleanup', () => {
+  const DAY_MS = 86_400_000;
+
+  async function insertToken(
+    userId: string,
+    familyId: string,
+    expiresInDays: number,
+    revoked: boolean,
+  ) {
+    const raw = generateRefreshToken();
+    await ctx.prisma.refreshToken.create({
+      data: {
+        tokenHash: hashToken(raw),
+        familyId,
+        userId,
+        expiresAt: new Date(Date.now() + expiresInDays * DAY_MS),
+        revokedAt: revoked ? new Date() : null,
+      },
+    });
+    return raw;
+  }
+  const rowsIn = (familyId: string) => ctx.prisma.refreshToken.count({ where: { familyId } });
+
+  it('deletes the families of a user whose newest token has expired, on login', async () => {
+    const manager = await ctx.prisma.user.findUniqueOrThrow({
+      where: { email: DEMO_ACCOUNTS.manager.email },
+    });
+    const admin = await ctx.prisma.user.findUniqueOrThrow({
+      where: { email: DEMO_ACCOUNTS.admin.email },
+    });
+
+    const dead = randomUUID();
+    await insertToken(manager.id, dead, -8, true);
+    await insertToken(manager.id, dead, -1, false);
+    // A session still in use: its first token expired long ago, the newest one is valid.
+    const live = randomUUID();
+    const liveOld = await insertToken(manager.id, live, -1, true);
+    const liveNewest = await insertToken(manager.id, live, 6, false);
+    const otherUser = randomUUID();
+    await insertToken(admin.id, otherUser, -1, false);
+
+    await ctx.login('manager');
+
+    expect(await rowsIn(dead)).toBe(0);
+    expect(await rowsIn(live)).toBe(2);
+    expect(await rowsIn(otherUser)).toBe(1);
+
+    // The revoked token of the live family is still found, so replaying it revokes the family.
+    const replay = await ctx.request.post('/api/auth/refresh').send({ refreshToken: liveOld });
+    expect(replay.status).toBe(401);
+    expect(replay.body.error.code).toBe('TOKEN_REUSED');
+    const newest = await ctx.request.post('/api/auth/refresh').send({ refreshToken: liveNewest });
+    expect(newest.status).toBe(401);
+  });
+
+  it('keeps the cleanup queries the same size however many sessions the user has', async () => {
+    const manager = await ctx.prisma.user.findUniqueOrThrow({
+      where: { email: DEMO_ACCOUNTS.manager.email },
+    });
+    // A shared demo account collects a family per login. PostgreSQL refuses a statement with
+    // more than 32,767 bind parameters, so a query that lists every live family would make
+    // login fail for such an account.
+    await ctx.prisma.refreshToken.createMany({
+      data: Array.from({ length: 1000 }, () => ({
+        tokenHash: hashToken(generateRefreshToken()),
+        familyId: randomUUID(),
+        userId: manager.id,
+        expiresAt: new Date(Date.now() + DAY_MS),
+      })),
+    });
+    const dead = randomUUID();
+    await insertToken(manager.id, dead, -1, false);
+
+    const logged = new PrismaClient({
+      datasourceUrl: ctx.env.DATABASE_URL,
+      log: [{ emit: 'event', level: 'query' }],
+    });
+    let mostParams = 0;
+    logged.$on('query', (event) => {
+      mostParams = Math.max(mostParams, (JSON.parse(event.params) as unknown[]).length);
+    });
+    try {
+      const { email, password } = DEMO_ACCOUNTS.manager;
+      await new AuthService(logged, ctx.env).login(email, password);
+    } finally {
+      await logged.$disconnect();
+    }
+
+    expect(await rowsIn(dead)).toBe(0);
+    expect(mostParams).toBeLessThan(10);
   });
 });
