@@ -110,6 +110,11 @@ export class ApiClient {
         () => undefined,
       );
     },
+    /** Ends every session of the user; the local one is cleared only after the server answered. */
+    logoutAll: async () => {
+      await this.request<{ ok: true }>('POST', '/auth/logout-all');
+      this.session.set(null);
+    },
     me: () => this.request<User>('GET', '/auth/me'),
   };
 

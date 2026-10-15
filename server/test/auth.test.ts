@@ -311,3 +311,118 @@ describe('refresh token cleanup', () => {
     expect(mostParams).toBeLessThan(10);
   });
 });
+
+describe('POST /api/auth/logout-all', () => {
+  const refresh = (refreshToken: string) =>
+    ctx.request.post('/api/auth/refresh').send({ refreshToken });
+  const logoutAll = (accessToken: string) =>
+    ctx.request.post('/api/auth/logout-all').set({ Authorization: `Bearer ${accessToken}` });
+  const liveTokensOf = (userId: string) =>
+    ctx.prisma.refreshToken.count({ where: { userId, revokedAt: null } });
+
+  it('revokes every session of the user, the current one included', async () => {
+    const laptop = await ctx.login('admin');
+    const phone = await ctx.login('admin');
+    const rotated = await refresh(phone.refreshToken);
+    expect(rotated.status).toBe(200);
+    const manager = await ctx.login('manager');
+
+    const res = await logoutAll(laptop.accessToken);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+
+    expect(await liveTokensOf(laptop.user.id)).toBe(0);
+    for (const token of [laptop.refreshToken, rotated.body.refreshToken]) {
+      const denied = await refresh(token);
+      expect(denied.status).toBe(401);
+      expect(denied.body.error.code).toBe('TOKEN_REUSED');
+    }
+    // Another user's sessions are not touched.
+    expect((await refresh(manager.refreshToken)).status).toBe(200);
+  });
+
+  it('answers replays of old tokens by the reuse rules and lets the user log in again', async () => {
+    const before = await ctx.login('admin');
+    const rotated = await refresh(before.refreshToken);
+    expect(rotated.status).toBe(200);
+    await logoutAll(rotated.body.accessToken).expect(200);
+
+    const fresh = await ctx.login('admin');
+    // The token rotated away before the call is a reuse, as it was before.
+    const replay = await refresh(before.refreshToken);
+    expect(replay.status).toBe(401);
+    expect(replay.body.error.code).toBe('TOKEN_REUSED');
+    // The new login is its own family, so the replay does not end it.
+    expect((await refresh(fresh.refreshToken)).status).toBe(200);
+  });
+
+  it('refuses a token that a refresh in flight inserted after the revoking update', async () => {
+    // On PostgreSQL, a refresh that has revoked its token but not committed yet makes the
+    // revoking UPDATE wait for that row, and the token the refresh inserts next is not in the
+    // UPDATE's snapshot, so it stays live. SQLite runs one writer at a time, so this test
+    // builds the state that race leaves behind.
+    const session = await ctx.login('manager');
+    const used = await ctx.prisma.refreshToken.findUniqueOrThrow({
+      where: { tokenHash: hashToken(session.refreshToken) },
+    });
+    await ctx.prisma.refreshToken.update({
+      where: { id: used.id },
+      data: { revokedAt: new Date() },
+    });
+    await logoutAll(session.accessToken).expect(200);
+    const late = generateRefreshToken();
+    await ctx.prisma.refreshToken.create({
+      data: {
+        tokenHash: hashToken(late),
+        familyId: used.familyId,
+        userId: used.userId,
+        expiresAt: used.expiresAt,
+        tokenVersion: used.tokenVersion,
+      },
+    });
+
+    const res = await refresh(late);
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('TOKEN_REUSED');
+  });
+
+  it('leaves access tokens issued before the call working until they expire', async () => {
+    const session = await ctx.login('manager');
+    await logoutAll(session.accessToken).expect(200);
+    const me = await ctx.request
+      .get('/api/auth/me')
+      .set({ Authorization: `Bearer ${session.accessToken}` });
+    expect(me.status).toBe(200);
+    expect((await refresh(session.refreshToken)).status).toBe(401);
+  });
+
+  it('requires an access token', async () => {
+    const session = await ctx.login('manager');
+    const anonymous = await ctx.request.post('/api/auth/logout-all');
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.body.error.code).toBe('UNAUTHORIZED');
+    // A refresh token is not an access token.
+    const wrongToken = await logoutAll(session.refreshToken);
+    expect(wrongToken.status).toBe(401);
+    expect(await liveTokensOf(session.user.id)).toBeGreaterThan(0);
+    expect((await refresh(session.refreshToken)).status).toBe(200);
+  });
+
+  it('has the login rate limit', async () => {
+    const limited = await createTestContext({ RATE_LIMIT_LOGIN_MAX: '3' });
+    try {
+      const { accessToken } = await limited.login('manager');
+      const statuses = [];
+      for (let i = 0; i < 4; i++) {
+        const res = await limited.request
+          .post('/api/auth/logout-all')
+          .set({ Authorization: `Bearer ${accessToken}` });
+        statuses.push(res.status);
+        if (res.status === 429) expect(res.body.error.code).toBe('RATE_LIMITED');
+      }
+      expect(statuses).toEqual([200, 200, 200, 429]);
+    } finally {
+      await limited.close();
+    }
+  });
+});

@@ -6,6 +6,8 @@ import { ContactsTable } from './contacts/contacts-table';
 import { Pagination, pageWindow } from './contacts/pagination';
 import { KpiCards } from './dashboard/kpi-cards';
 import { DealCard } from './deals/deal-card';
+import { SignOutEverywhere } from './layout/sign-out-everywhere';
+import { ApiError } from '@/lib/api/errors';
 
 const contact = (i: number): Contact => ({
   id: `ct_${i}`,
@@ -122,5 +124,51 @@ describe('DealCard', () => {
     expect(screen.getByText('$7,500')).toBeInTheDocument();
     expect(screen.getByText(/Nettlefield Clinic/)).toBeInTheDocument();
     expect(screen.getByLabelText('Owned by another user')).toBeInTheDocument();
+  });
+});
+
+describe('SignOutEverywhere', () => {
+  const openDialog = async () => {
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out everywhere' }));
+    return screen.getByRole('dialog', { name: 'Sign out everywhere?' });
+  };
+
+  it('signs out only after the confirmation', async () => {
+    const onConfirm = vi.fn(async () => {});
+    render(<SignOutEverywhere onConfirm={onConfirm} />);
+
+    await userEvent.click(within(await openDialog()).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    await userEvent.click(
+      within(await openDialog()).getByRole('button', { name: 'Sign out everywhere' }),
+    );
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the dialog outside the sticky sidebar it is opened from', async () => {
+    // A sticky element is a stacking context, so a modal inside it would sit under the page.
+    render(
+      <aside className="sticky top-0">
+        <SignOutEverywhere onConfirm={async () => {}} />
+      </aside>,
+    );
+    const dialog = await openDialog();
+    expect(dialog.closest('aside')).toBeNull();
+  });
+
+  it('keeps the dialog open with the error when the call fails', async () => {
+    const onConfirm = vi.fn(async () => {
+      throw new ApiError(429, 'RATE_LIMITED', 'Too many requests, retry in 1 minute');
+    });
+    render(<SignOutEverywhere onConfirm={onConfirm} />);
+
+    const dialog = await openDialog();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Sign out everywhere' }));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Too many requests, retry in 1 minute',
+    );
+    expect(within(dialog).getByRole('button', { name: 'Sign out everywhere' })).toBeEnabled();
   });
 });

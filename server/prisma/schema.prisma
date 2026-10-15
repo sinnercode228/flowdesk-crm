@@ -19,6 +19,8 @@ model User {
   /// "admin" | "manager"
   role          String         @default("manager")
   avatarColor   String         @default("#6366f1")
+  /// Raised by "log out everywhere"; refresh tokens of families started under a lower value are refused.
+  tokenVersion  Int            @default(0)
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
   deals         Deal[]
@@ -38,6 +40,8 @@ model RefreshToken {
   expiresAt    DateTime
   revokedAt    DateTime?
   replacedById String?
+  /// The user's tokenVersion when the family started; every rotation copies it.
+  tokenVersion Int       @default(0)
   createdAt    DateTime  @default(now())
 
   @@index([familyId])

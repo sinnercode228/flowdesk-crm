@@ -18,6 +18,8 @@ interface AuthContextValue {
   user: User | null | undefined;
   login: (email: string, password: string) => Promise<User>;
   logout: () => Promise<void>;
+  /** Ends every session of the user, this one included. */
+  logoutAll: () => Promise<void>;
   can: (permission: Permission, resource?: { ownerId?: string | null }) => boolean;
 }
 
@@ -45,14 +47,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await getApi().auth.logout();
   }, []);
 
+  const logoutAll = useCallback(async () => {
+    await getApi().auth.logoutAll();
+  }, []);
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       login,
       logout,
+      logoutAll,
       can: (permission, resource) => can(user ?? null, permission, resource),
     }),
-    [user, login, logout],
+    [user, login, logout, logoutAll],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
