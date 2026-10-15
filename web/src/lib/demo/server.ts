@@ -312,6 +312,12 @@ export function createDemoServer(options: DemoServerOptions) {
     false,
   );
 
+  route('POST', '/auth/logout-all', ({ actor }) => {
+    for (const t of state.refreshTokens)
+      if (t.userId === actor!.id && !t.revokedAt) t.revokedAt = now().toISOString();
+    return { body: { ok: true }, mutated: true };
+  });
+
   route('GET', '/auth/me', ({ actor }) => ({ body: toUser(actor!) }));
 
   route('GET', '/users', () => ({

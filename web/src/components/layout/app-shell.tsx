@@ -13,6 +13,7 @@ import { getDemoServer } from '@/lib/api';
 import { Avatar, Spinner } from '../ui/misc';
 import { DemoFooter } from './demo-footer';
 import { Logo } from './logo';
+import { SignOutEverywhere } from './sign-out-everywhere';
 
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', icon: BarChart3 },
@@ -21,7 +22,7 @@ const NAV = [
 ] as const;
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { user, logout } = useAuth();
+  const { user, logout, logoutAll } = useAuth();
   const { theme, toggle } = useTheme();
   const router = useRouter();
   const pathname = usePathname();
@@ -73,21 +74,24 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 
   const userBox = (
-    <div className="flex items-center gap-3 rounded-lg border border-line p-2.5">
-      <Avatar name={user.name} color={user.avatarColor} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{user.name}</p>
-        <p className="text-xs text-muted capitalize">{user.role}</p>
+    <div className="rounded-lg border border-line p-2.5">
+      <div className="flex items-center gap-3">
+        <Avatar name={user.name} color={user.avatarColor} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{user.name}</p>
+          <p className="text-xs text-muted capitalize">{user.role}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void logout()}
+          className="rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-ink"
+          aria-label="Sign out"
+          title="Sign out"
+        >
+          <LogOut className="size-4" />
+        </button>
       </div>
-      <button
-        type="button"
-        onClick={() => void logout()}
-        className="rounded-md p-1.5 text-muted hover:bg-surface-2 hover:text-ink"
-        aria-label="Sign out"
-        title="Sign out"
-      >
-        <LogOut className="size-4" />
-      </button>
+      <SignOutEverywhere onConfirm={logoutAll} />
     </div>
   );
 

@@ -79,6 +79,44 @@ describe('demo API: auth', () => {
       body: { error: { code: 'TOKEN_EXPIRED' } },
     });
   });
+
+  it('logs out every session of the user and leaves other users alone', () => {
+    const refresh = (refreshToken: string) =>
+      call({ method: 'POST', path: '/auth/refresh', body: { refreshToken } });
+    const laptop = login();
+    const phone = login();
+    const rotated = refresh(phone.session.refreshToken);
+    expect(rotated.status).toBe(200);
+    const manager = login('manager');
+
+    expect(call({ method: 'POST', path: '/auth/logout-all', headers: laptop.headers })).toEqual({
+      status: 200,
+      body: { ok: true },
+    });
+    const saved = createDemoServer({ storage }).getState().refreshTokens;
+    expect(saved.filter((t) => t.userId === laptop.session.user.id && !t.revokedAt)).toEqual([]);
+
+    for (const token of [
+      laptop.session.refreshToken,
+      phone.session.refreshToken,
+      (rotated.body as AuthSession).refreshToken,
+    ]) {
+      expect(refresh(token)).toMatchObject({
+        status: 401,
+        body: { error: { code: 'TOKEN_REUSED' } },
+      });
+    }
+    expect(refresh(manager.session.refreshToken).status).toBe(200);
+    // Access tokens are not tracked, so the one that made the call works until it expires.
+    expect(call({ method: 'GET', path: '/auth/me', headers: laptop.headers }).status).toBe(200);
+  });
+
+  it('requires a bearer token to log out everywhere', () => {
+    expect(call({ method: 'POST', path: '/auth/logout-all' })).toMatchObject({
+      status: 401,
+      body: { error: { code: 'UNAUTHORIZED' } },
+    });
+  });
 });
 
 describe('demo API: deals', () => {

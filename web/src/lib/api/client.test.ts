@@ -82,6 +82,37 @@ describe('ApiClient', () => {
     expect(tabA.session.get()).not.toBeNull();
   });
 
+  it('logs out everywhere: other devices lose their session once their access token expires', async () => {
+    let now = new Date('2026-05-01T10:00:00Z');
+    const server = createDemoServer({ storage: memoryStateStorage(), now: () => now });
+    const laptop = new ApiClient(server.transport, new SessionStore(memoryStorage()));
+    const phone = new ApiClient(server.transport, new SessionStore(memoryStorage()));
+    await laptop.auth.login(DEMO_ACCOUNTS.admin.email, DEMO_ACCOUNTS.admin.password);
+    await phone.auth.login(DEMO_ACCOUNTS.admin.email, DEMO_ACCOUNTS.admin.password);
+
+    await laptop.auth.logoutAll();
+    expect(laptop.session.get()).toBeNull();
+    await expect(phone.stages.list()).resolves.not.toHaveLength(0);
+
+    now = new Date(now.getTime() + 20 * 60_000);
+    await expect(phone.stages.list()).rejects.toMatchObject({ status: 401 });
+    expect(phone.session.get()).toBeNull();
+  });
+
+  it('keeps the session when logging out everywhere fails', async () => {
+    const server = createDemoServer({ storage: memoryStateStorage() });
+    const client = new ApiClient(
+      async (req) =>
+        req.path === '/auth/logout-all'
+          ? { status: 0, body: { error: { code: 'INTERNAL', message: 'Network error' } } }
+          : server.transport(req),
+      new SessionStore(memoryStorage()),
+    );
+    await client.auth.login(DEMO_ACCOUNTS.admin.email, DEMO_ACCOUNTS.admin.password);
+    await expect(client.auth.logoutAll()).rejects.toBeInstanceOf(ApiError);
+    expect(client.session.get()?.user.role).toBe('admin');
+  });
+
   it('drops the cached session when another tab changes it', async () => {
     const shared = memoryStorage();
     const store = new SessionStore(shared);
