@@ -23,12 +23,13 @@ export class AuthService {
     const valid = await verifyPassword(password, user?.passwordHash ?? (await getDummyHash()));
     if (!user || !valid) throw unauthorized('Invalid e-mail or password', 'INVALID_CREDENTIALS');
     await this.deleteExpiredFamilies(user.id, new Date());
-    return (await this.issueSession(user, randomUUID())).dto;
+    return (await this.issueSession(user, randomUUID(), user.tokenVersion)).dto;
   }
 
   /**
    * Rotates a refresh token. Presenting an already rotated (revoked) token is treated as
-   * theft: the whole token family is revoked and the user has to log in again.
+   * theft: the whole token family is revoked and the user has to log in again. A family
+   * started before the user's last logout-all counts as revoked too (see logoutAll).
    */
   async refresh(rawToken: string): Promise<AuthSession> {
     const now = new Date();
@@ -38,7 +39,8 @@ export class AuthService {
     });
     if (!stored) throw unauthorized('Invalid refresh token');
 
-    if (stored.revokedAt) return this.reuseDetected(stored.familyId, now);
+    if (stored.revokedAt || stored.tokenVersion !== stored.user.tokenVersion)
+      return this.reuseDetected(stored.familyId, now);
     if (stored.expiresAt <= now) throw unauthorized('Refresh token expired', 'TOKEN_EXPIRED');
 
     const session = await this.prisma.$transaction(async (tx) => {
@@ -49,7 +51,7 @@ export class AuthService {
       });
       if (count !== 1) return null;
 
-      const issued = await this.issueSession(stored.user, stored.familyId, tx);
+      const issued = await this.issueSession(stored.user, stored.familyId, stored.tokenVersion, tx);
       await tx.refreshToken.update({
         where: { id: stored.id },
         data: { replacedById: issued.refreshTokenId },
@@ -72,6 +74,26 @@ export class AuthService {
       where: { tokenHash: hashToken(rawToken) },
     });
     if (stored) await this.revokeFamily(stored.familyId, new Date());
+  }
+
+  /**
+   * Ends every session of the user: one update revokes all their live refresh tokens, whatever
+   * family they belong to. On PostgreSQL that update can miss a token: a refresh that has
+   * revoked its token but not committed yet makes the update wait for that row, and the token
+   * the refresh inserts next is not in the update's snapshot. The version bump catches it, since
+   * the new token keeps its family's old version and refresh refuses it.
+   */
+  async logoutAll(userId: string): Promise<void> {
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: userId },
+        data: { tokenVersion: { increment: 1 } },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
   }
 
   async me(userId: string): Promise<User> {
@@ -119,6 +141,7 @@ export class AuthService {
   private async issueSession(
     user: UserRow,
     familyId: string,
+    tokenVersion: number,
     db: Pick<PrismaClient, 'refreshToken'> = this.prisma,
   ): Promise<{ dto: AuthSession; refreshTokenId: string }> {
     const refreshToken = generateRefreshToken();
@@ -127,6 +150,7 @@ export class AuthService {
         tokenHash: hashToken(refreshToken),
         familyId,
         userId: user.id,
+        tokenVersion,
         expiresAt: new Date(Date.now() + this.env.REFRESH_TOKEN_TTL_DAYS * DAY_MS),
       },
     });

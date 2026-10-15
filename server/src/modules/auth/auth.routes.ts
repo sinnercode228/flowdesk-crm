@@ -59,6 +59,24 @@ export const authRoutes: FastifyPluginAsyncZod = async (app) => {
     },
   );
 
+  app.post(
+    '/logout-all',
+    {
+      onRequest: [app.authenticate],
+      schema: {
+        tags: ['auth'],
+        summary: 'Revoke every refresh token family of the current user',
+        security: secured,
+        response: { 200: OkResponseSchema, ...errorResponses(401, 404, 429) },
+      },
+      config: { rateLimit: { max: app.config.RATE_LIMIT_LOGIN_MAX, timeWindow: '1 minute' } },
+    },
+    async (request) => {
+      await service.logoutAll(requireAuth(request).id);
+      return { ok: true as const };
+    },
+  );
+
   app.get(
     '/me',
     {
