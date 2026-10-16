@@ -4,5 +4,12 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "test", "scripts", "vitest.config.ts", "tsup.config.ts"]
+  "include": [
+    "src",
+    "test",
+    "scripts",
+    "vitest.config.ts",
+    "vitest.postgres.config.ts",
+    "tsup.config.ts"
+  ]
 }

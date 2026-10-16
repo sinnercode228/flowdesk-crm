@@ -88,7 +88,7 @@ export const dealRoutes: FastifyPluginAsyncZod = async (app) => {
         security: secured,
         params: IdParamsSchema,
         body: MoveDealSchema,
-        response: { 200: DealSchema, ...errorResponses(400, 401, 403, 404) },
+        response: { 200: DealSchema, ...errorResponses(400, 401, 403, 404, 409) },
       },
     },
     async (request) => service.move(request.params.id, request.body, requireAuth(request)),
@@ -120,7 +120,7 @@ export const dealRoutes: FastifyPluginAsyncZod = async (app) => {
         summary: 'Delete a deal (admin only)',
         security: secured,
         params: IdParamsSchema,
-        response: { 200: OkResponseSchema, ...errorResponses(401, 403, 404) },
+        response: { 200: OkResponseSchema, ...errorResponses(401, 403, 404, 409) },
       },
     },
     async (request) => {

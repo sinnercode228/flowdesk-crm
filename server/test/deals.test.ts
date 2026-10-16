@@ -1,5 +1,8 @@
+import type { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Deal, DealDetail } from '@flowdesk/shared';
+import { AppError } from '../src/lib/errors';
+import { DealsService } from '../src/modules/deals/deals.service';
 import { createTestContext, type TestContext } from './helpers';
 
 let ctx: TestContext;
@@ -162,6 +165,36 @@ describe('POST /api/deals/:id/move', () => {
     expect(res.body.closedAt).toBeNull();
     const lead = await column('stg_lead');
     expect(lead[lead.length - 1]!.id).toBe(wonDeal!.id);
+  });
+
+  it('gives up with 409 when the deal keeps leaving the columns the move locked', async () => {
+    const before = await column('stg_proposal');
+    // The first read of every attempt finds the deal in Lead, as if another move took it away
+    // from Lead each time before this one got the lock.
+    let staleReads = 0;
+    const racing = ctx.prisma.$extends({
+      query: {
+        deal: {
+          async findUnique({ args, query }) {
+            const row = await query(args);
+            if (!row || !args.select?.stageId) return row;
+            staleReads++;
+            return { ...row, stageId: 'stg_lead' };
+          },
+        },
+      },
+    });
+    const service = new DealsService(racing as unknown as PrismaClient, true);
+    const actor = { id: 'usr_admin', email: 'admin@flowdesk.example', name: 'Admin' };
+
+    const failure = await service
+      .move(before[0]!.id, { stageId: 'stg_won', position: 0 }, { ...actor, role: 'admin' })
+      .catch((err: unknown) => err);
+
+    expect(failure).toBeInstanceOf(AppError);
+    expect((failure as AppError).statusCode).toBe(409);
+    expect(staleReads).toBe(3);
+    expect(await column('stg_proposal')).toEqual(before);
   });
 
   it('returns 404 for unknown deals', async () => {

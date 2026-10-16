@@ -11,15 +11,11 @@ import { loadEnv } from '../src/config/env';
 
 export const TEST_JWT_SECRET = 'test-secret-that-is-long-enough-for-hs256-signing';
 
-/** Spins up an isolated app + database copy for one test file. */
-export async function createTestContext(envOverrides: Record<string, string> = {}) {
-  const template = inject('templateDb');
-  const dbFile = join(dirname(template), `${randomUUID()}.db`);
-  copyFileSync(template, dbFile);
-
+/** Starts the app on a loopback port against `databaseUrl`, which must already be seeded. */
+export async function startTestApp(databaseUrl: string, envOverrides: Record<string, string> = {}) {
   const env = loadEnv({
     NODE_ENV: 'test',
-    DATABASE_URL: `file:${dbFile}`,
+    DATABASE_URL: databaseUrl,
     JWT_ACCESS_SECRET: TEST_JWT_SECRET,
     LOG_LEVEL: 'silent',
     RATE_LIMIT_LOGIN_MAX: '1000',
@@ -52,11 +48,27 @@ export async function createTestContext(envOverrides: Record<string, string> = {
   async function close() {
     await app.close();
     await prisma.$disconnect();
+  }
+
+  return { app, env, prisma, request, login, authHeader, close };
+}
+
+export type TestApp = Awaited<ReturnType<typeof startTestApp>>;
+
+/** Spins up an isolated app + database copy for one test file. */
+export async function createTestContext(envOverrides: Record<string, string> = {}) {
+  const template = inject('templateDb');
+  const dbFile = join(dirname(template), `${randomUUID()}.db`);
+  copyFileSync(template, dbFile);
+
+  const server = await startTestApp(`file:${dbFile}`, envOverrides);
+  async function close() {
+    await server.close();
     rmSync(dbFile, { force: true });
   }
 
   const dataset = generateDemoDataset({ now: new Date(inject('seedNow')) });
-  return { app, env, prisma, request, login, authHeader, close, dataset };
+  return { ...server, close, dataset };
 }
 
 export type TestContext = Awaited<ReturnType<typeof createTestContext>>;

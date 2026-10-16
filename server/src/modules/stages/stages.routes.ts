@@ -1,5 +1,5 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import {
   CreateStageSchema,
   IdParamsSchema,
@@ -10,12 +10,16 @@ import {
   type Stage,
 } from '@flowdesk/shared';
 import type { z } from 'zod';
+import { isSqliteUrl } from '../../config/env';
 import { toStageDto } from '../../lib/dto';
 import { conflict, notFound } from '../../lib/errors';
 import { errorResponses, secured } from '../../lib/openapi';
 
 export class StagesService {
-  constructor(private readonly prisma: PrismaClient) {}
+  constructor(
+    private readonly prisma: PrismaClient,
+    private readonly sqlite: boolean,
+  ) {}
 
   async list(): Promise<Stage[]> {
     const stages = await this.prisma.stage.findMany({
@@ -35,6 +39,7 @@ export class StagesService {
   async update(id: string, input: z.output<typeof UpdateStageSchema>): Promise<Stage> {
     const { position, ...fields } = input;
     return this.prisma.$transaction(async (tx) => {
+      await this.lockAll(tx);
       const existing = await tx.stage.findUnique({ where: { id } });
       if (!existing) throw notFound('Stage');
       if (position !== undefined && position !== existing.position) {
@@ -54,6 +59,7 @@ export class StagesService {
 
   async remove(id: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
+      await this.lockAll(tx);
       const stage = await tx.stage.findUnique({
         where: { id },
         include: { _count: { select: { deals: true } } },
@@ -67,10 +73,20 @@ export class StagesService {
       });
     });
   }
+
+  /**
+   * Locks every stage row in id order, the order in which deal writes lock the stages of their
+   * columns (`DealsService.lockStages`). Writing the rows in pipeline order instead could hold a
+   * stage that a move is waiting for while waiting for the other stage that move already holds.
+   */
+  private async lockAll(tx: Prisma.TransactionClient) {
+    if (this.sqlite) return;
+    await tx.$queryRaw`SELECT id FROM "Stage" ORDER BY id FOR UPDATE`;
+  }
 }
 
 export const stageRoutes: FastifyPluginAsyncZod = async (app) => {
-  const service = new StagesService(app.prisma);
+  const service = new StagesService(app.prisma, isSqliteUrl(app.config.DATABASE_URL));
   app.addHook('onRequest', app.authenticate);
   const manage = app.requirePermission('stage:manage');
 
