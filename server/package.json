@@ -11,6 +11,7 @@
     "start": "node dist/index.js",
     "typecheck": "npm run db:generate:sqlite --silent && tsc --noEmit",
     "test": "npm run db:generate:sqlite --silent && vitest run",
+    "test:postgres": "npm run db:generate --silent && vitest run --config vitest.postgres.config.ts",
     "test:watch": "vitest",
     "db:generate": "prisma generate",
     "db:generate:sqlite": "node scripts/sqlite-schema.mjs && prisma generate --schema prisma/sqlite/schema.prisma",
