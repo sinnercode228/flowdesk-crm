@@ -1,6 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { Deal, DealDetail } from '@flowdesk/shared';
+import type { Deal, DealDetail, Stage } from '@flowdesk/shared';
 import { startTestApp, type TestApp } from '../helpers';
 
 const url = process.env.TEST_POSTGRES_URL;
@@ -22,6 +22,10 @@ describe.skipIf(!url)('deal positions under concurrent writes on PostgreSQL', ()
   const create = async (i: number, title: string, stageId: string) =>
     api(i).post('/api/deals').set(admin).send({ title, value: 1000, stageId });
   const remove = async (i: number, id: string) => api(i).delete(`/api/deals/${id}`).set(admin);
+  const moveStage = async (i: number, id: string, position: number) =>
+    api(i).patch(`/api/stages/${id}`).set(admin).send({ position });
+  const removeStage = async (i: number, id: string) =>
+    api(i).delete(`/api/stages/${id}`).set(admin);
 
   async function board(): Promise<Deal[]> {
     const res = await api(0).get('/api/deals').set(admin);
@@ -38,6 +42,14 @@ describe.skipIf(!url)('deal positions under concurrent writes on PostgreSQL', ()
       Object.entries(positions).map(([stageId, list]) => [stageId, list.map((_, i) => i)]),
     );
     expect(positions).toEqual(contiguous);
+  }
+
+  async function expectContiguousStages(): Promise<Stage[]> {
+    const res = await api(0).get('/api/stages').set(admin);
+    expect(res.status).toBe(200);
+    const stages = res.body as Stage[];
+    expect(stages.map((s) => s.position)).toEqual(stages.map((_, i) => i));
+    return stages;
   }
 
   /** Locks a stage row in a transaction of its own until the returned function commits it. */
@@ -160,5 +172,47 @@ describe.skipIf(!url)('deal positions under concurrent writes on PostgreSQL', ()
     await expectContiguousBoard();
     const detail = (await api(0).get(`/api/deals/${deal!.id}`).set(admin)).body as DealDetail;
     expect(detail.activities[0]!.meta).toEqual({ from: 'Won', to: 'Lost' });
+  });
+
+  it('reorders stages while a deal moves between them without a deadlock', async () => {
+    const [deal] = await column('stg_lead');
+
+    // Stops the move between its two stage locks: it holds Lead and waits for Lost. A share lock
+    // does that, and the stage UPDATE below doesn't wait for one.
+    const unlockLost = await lockStage(Prisma.sql`
+      SELECT id FROM "Stage" WHERE id = 'stg_lost' FOR KEY SHARE`);
+    const moving = move(1, deal!.id, 'stg_lost', 0);
+    await expect.poll(lockWaiters, { timeout: 5_000 }).toBe(1);
+    // Lost to the front of the pipeline: the reorder writes Lost first and Lead second.
+    const reordering = moveStage(2, 'stg_lost', 0);
+    await expect.poll(lockWaiters, { timeout: 5_000 }).toBe(2);
+    await unlockLost();
+
+    const [moved, reordered] = await Promise.all([moving, reordering]);
+    expect([moved.status, reordered.status]).toEqual([200, 200]);
+    await expectContiguousBoard();
+    const stages = await expectContiguousStages();
+    expect(stages[0]!.id).toBe('stg_lost');
+  });
+
+  it('deletes a stage while a move into it holds the first of its locks without a deadlock', async () => {
+    // After Lead in id order and first in the pipeline, so deleting it renumbers Lead.
+    await apps[0]!.prisma.stage.create({
+      data: { id: 'stg_review', name: 'Review', probability: 30, position: 99 },
+    });
+    expect((await moveStage(0, 'stg_review', 0)).status).toBe(200);
+
+    // The first half of a move from Lead into Review, which asks for Review once it has Lead.
+    const unlockLead = await lockStage(Prisma.sql`
+      SELECT id FROM "Stage" WHERE id = 'stg_lead' FOR UPDATE`);
+    const removing = removeStage(2, 'stg_review');
+    await expect.poll(lockWaiters, { timeout: 5_000 }).toBe(1);
+    await unlockLead(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Stage" WHERE id = 'stg_review' FOR UPDATE`;
+    });
+
+    expect((await removing).status).toBe(200);
+    const stages = await expectContiguousStages();
+    expect(stages.map((s) => s.id)).not.toContain('stg_review');
   });
 });
