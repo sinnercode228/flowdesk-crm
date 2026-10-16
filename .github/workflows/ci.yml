@@ -35,7 +35,8 @@ jobs:
           NEXT_TELEMETRY_DISABLED: 1
 
   api-postgres:
-    # Applies the PostgreSQL migration and seeds a real Postgres to catch provider differences.
+    # Applies the PostgreSQL migrations, seeds a real Postgres and runs the tests that need it
+    # (concurrent writes to deal positions), to catch provider differences.
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -61,6 +62,10 @@ jobs:
       - run: npx prisma migrate deploy --schema prisma/schema.prisma
         working-directory: server
       - run: npm run db:seed -w server
+      - name: Tests on PostgreSQL (concurrent deal moves)
+        run: npm run test:postgres -w server
+        env:
+          TEST_POSTGRES_URL: ${{ env.DATABASE_URL }}
 
   docker:
     runs-on: ubuntu-latest
