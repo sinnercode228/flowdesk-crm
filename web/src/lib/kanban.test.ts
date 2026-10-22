@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyMove, groupByStage, type Positioned } from './kanban';
+import { applyMove, endOfColumn, groupByStage, type Positioned } from './kanban';
 
 const row = (id: string, stageId: string, position: number): Positioned => ({
   id,
@@ -45,5 +45,20 @@ describe('applyMove', () => {
   it('ignores unknown ids', () => {
     const items = board();
     expect(applyMove(items, 'zzz', 's1', 0)).toBe(items);
+  });
+});
+
+describe('endOfColumn', () => {
+  it('counts rows in the target column', () => {
+    expect(endOfColumn(board(), 's1')).toBe(3);
+    expect(endOfColumn(board(), 's2')).toBe(2);
+    expect(endOfColumn(board(), 's3')).toBe(0);
+  });
+
+  it('excludes the moving row from the count when it is in the target column', () => {
+    // Within s2, excluding d: appending 'd' should land at position 1, keeping e above it.
+    expect(endOfColumn(board(), 's2', 'd')).toBe(1);
+    // When the moving row is in a different column, nothing is subtracted.
+    expect(endOfColumn(board(), 's2', 'a')).toBe(2);
   });
 });

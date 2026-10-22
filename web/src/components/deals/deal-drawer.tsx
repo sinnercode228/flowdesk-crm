@@ -3,10 +3,18 @@
 import { useState, type FormEvent } from 'react';
 import { ArrowRightLeft, MessageSquare, Pencil, Plus, Trash2 } from 'lucide-react';
 import type { Activity, DealDetail, Stage, User } from '@flowdesk/shared';
-import { useAddNote, useDeal, useDeleteDeal, useMoveDeal, useUpdateDeal } from '@/hooks/queries';
+import {
+  useAddNote,
+  useDeal,
+  useDeals,
+  useDeleteDeal,
+  useMoveDeal,
+  useUpdateDeal,
+} from '@/hooks/queries';
 import { useAuth } from '@/hooks/use-auth';
 import { errorMessage } from '@/lib/api';
 import { formatDate, formatMoney, formatRelative } from '@/lib/format';
+import { endOfColumn } from '@/lib/kanban';
 import { Button } from '../ui/button';
 import { Select, Textarea } from '../ui/field';
 import { Avatar, ErrorNote, Skeleton, Spinner } from '../ui/misc';
@@ -74,9 +82,16 @@ function DrawerBody({
   const move = useMoveDeal();
   const addNote = useAddNote(deal.id);
   const remove = useDeleteDeal();
+  const deals = useDeals();
   const [editing, setEditing] = useState(false);
   const [note, setNote] = useState('');
   const stage = stages.find((s) => s.id === deal.stageId);
+
+  const changeStage = (stageId: string) => {
+    if (stageId === deal.stageId) return;
+    const position = endOfColumn(deals.data ?? [], stageId, deal.id);
+    move.mutate({ id: deal.id, stageId, position });
+  };
 
   const submitNote = (e: FormEvent) => {
     e.preventDefault();
@@ -102,7 +117,7 @@ function DrawerBody({
             className="mt-1 h-8"
             value={deal.stageId}
             disabled={!canMove || move.isPending}
-            onChange={(e) => move.mutate({ id: deal.id, stageId: e.target.value, position: 0 })}
+            onChange={(e) => changeStage(e.target.value)}
           >
             {stages.map((s) => (
               <option key={s.id} value={s.id}>
