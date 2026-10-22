@@ -52,3 +52,17 @@ export function groupByStage<T extends Positioned>(
   for (const id of stageIds) columns[id]!.sort(byColumnOrder);
   return columns;
 }
+
+/**
+ * Position to pass to the move endpoint when appending to the end of `stageId`'s column,
+ * excluding `excludeId` if it is already in the list. The move service caps `position` at the
+ * target column's length, so a plain count works both for same-column moves (with the row
+ * excluded) and cross-column moves.
+ */
+export function endOfColumn(items: Positioned[], stageId: string, excludeId?: string): number {
+  let count = 0;
+  for (const item of items) {
+    if (item.stageId === stageId && item.id !== excludeId) count++;
+  }
+  return count;
+}
