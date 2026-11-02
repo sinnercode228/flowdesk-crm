@@ -112,7 +112,7 @@ Refresh, логин и logout-all ограничены отдельно от о�
    NEXT_PUBLIC_API_MODE=http NEXT_PUBLIC_API_URL=http://localhost:4000/api npm run dev:web
    ```
 
-   Повторный `db:setup:sqlite` или `npm run db:seed -w server` перед сидом стирает все данные, включая пользователей и сессии ([`server/src/db/seed.ts:22-28`](server/src/db/seed.ts#L22-L28)).
+   `npm run db:seed -w server` сидирует только пустую базу и отказывается трогать непустую; добавьте `-- --reset`, чтобы перед сидом стереть все данные (включая пользователей и сессии), или `-- --if-empty`, чтобы на непустой базе молча выйти ([`server/src/db/seed-cli.ts`](server/src/db/seed-cli.ts)). Повторный `db:setup:sqlite` на существующей базе теперь не перезатирает её, а останавливается с сообщением; чтобы сбросить, запустите `npm run db:seed -w server -- --reset`.
 
 4. Всё в Docker (PostgreSQL 17, API и собранная статика за nginx). API работает с `NODE_ENV=production`, а в [`docker-compose.yml`](docker-compose.yml) нет значения по умолчанию для `JWT_ACCESS_SECRET`: без него compose останавливается с ошибкой «required variable JWT_ACCESS_SECRET is missing a value». Один раз запишите случайный секрет в `.env` рядом с `docker-compose.yml` (файл в .gitignore) и запустите стек:
 
