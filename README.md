@@ -112,7 +112,7 @@ Stack: an npm workspaces monorepo with `web` (Next.js 16 with static export, Tan
    NEXT_PUBLIC_API_MODE=http NEXT_PUBLIC_API_URL=http://localhost:4000/api npm run dev:web
    ```
 
-   Running `db:setup:sqlite` again, or `npm run db:seed -w server`, deletes all data, users and sessions included, before seeding ([`server/src/db/seed.ts:22-28`](server/src/db/seed.ts#L22-L28)).
+   `npm run db:seed -w server` seeds a fresh database and refuses a non-empty one; pass `-- --reset` to wipe all data (users and sessions included) first, or `-- --if-empty` to skip without an error ([`server/src/db/seed-cli.ts`](server/src/db/seed-cli.ts)). Repeating `db:setup:sqlite` on an existing database therefore stops with a message rather than overwriting it; use `npm run db:seed -w server -- --reset` to reset.
 
 4. Everything in Docker (PostgreSQL 17, the API, and nginx serving the static build). The API runs with `NODE_ENV=production`, and [`docker-compose.yml`](docker-compose.yml) has no fallback for `JWT_ACCESS_SECRET`: without it, compose stops with "required variable JWT_ACCESS_SECRET is missing a value". Put a random one into `.env` next to `docker-compose.yml` once (the file is gitignored), then start the stack:
 
